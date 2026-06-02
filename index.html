@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>P2P 온라인 갓겜 - 격투 브롤</title>
+    <title>P2P 온라인 격투 브롤 (모든 조작키 통일 버전)</title>
     <style>
         body {
             background: #141419; color: #fff; font-family: 'Malgun Gothic', sans-serif;
@@ -26,7 +26,7 @@
 
         canvas { background: #25252e; border: 4px solid #444; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
         .info { margin-top: 10px; color: #aaa; font-size: 0.9rem; text-align: center; line-height: 1.4; }
-        .skill-info { color: #ffeb3b; font-weight: bold; }
+        .skill-box { color: #ffeb3b; font-weight: bold; margin-top: 5px; background: #1e1e24; padding: 5px 15px; border-radius: 4px; }
     </style>
 </head>
 <body>
@@ -42,20 +42,324 @@
         <div class="menu-section">
             <button onclick="createRoom()">방 만들기 (코드 자동 생성)</button>
         </div>
-
         <div class="menu-section">
             <input type="text" id="code-input" placeholder="접속코드 6자리 입력" maxlength="6">
             <button onclick="joinRoom()">방 들어가기</button>
         </div>
-
         <div id="status" style="margin-top: 10px; color: #ffeb3b;">방을 만들거나 코드를 입력해 입장하세요!</div>
     </div>
 
     <canvas id="gameCanvas" width="600" height="400"></canvas>
     
     <div class="info">
-        이동: 방향키 ◀ ▶ | 점프: ▲ | 기본공격: 스페이스바(Space) <br>
-        <span class="skill-info">🔥 특수 스킬: 에이치(H) 키 -> 바닥에 불장판 설치 (쿨타임 5초)</span>
+        이동: 방향키 ◀ ▶ | 점프: ▲ | 일반공격(평타): [ W ] 키
+        <div id="skill-text" class="skill-box">게임을 시작하면 무작위 특수 스킬이 배정됩니다!</div>
     </div>
 
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusText = document.getElementById('status');
+        const p1KdText = document.getElementById('p1-kd');
+        const p2KdText = document.getElementById('p2-kd');
+        const skillIdText = document.getElementById('skill-text');
+
+        let peer = null;
+        let conn = null;
+        let isHost = false;
+        let gameStarted = false;
+
+        const CANVAS_WIDTH = 600;
+        const CANVAS_HEIGHT = 400;
+
+        const SKILL_TYPES = ['FIREWALL', 'LIGHTNING', 'BLIZZARD'];
+        const SKILL_NAMES = {
+            'FIREWALL': '🔥 파이어 월 (바닥 지속딜)',
+            'LIGHTNING': '⚡ 라이트닝 (머리 위 번개 폭딜)',
+            'BLIZZARD': '❄️ 블리자드 (상대 2.5초 이속 저하)'
+        };
+
+        let myPlayer = { x: 100, y: 360, vx: 0, vy: 0, color: '#4CAF50', hp: 100, kills: 0, deaths: 0, facing: 1, skillCool: 0, skill: '', slowTimer: 0 };
+        let enemyPlayer = { x: 480, y: 360, vx: 0, vy: 0, color: '#FF5722', hp: 100, kills: 0, deaths: 0, facing: -1, skill: '', slowTimer: 0 };
+        
+        let projectiles = [];
+        let firewalls = []; 
+        let lightnings = []; 
+        let blizzardActive = { host: 0, guest: 0 }; 
+
+        const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false };
+
+        function initPeer() {
+            if (peer) peer.destroy();
+            peer = new Peer();
+            peer.on('error', (err) => { if (err.type === 'unavailable-id') createRoom(); });
+        }
+        initPeer();
+
+        function createRoom() {
+            isHost = true;
+            peer.destroy(); 
+            const autoCode = Math.random().toString(36).substring(2, 8);
+            peer = new Peer(autoCode);
+            
+            peer.on('open', (id) => {
+                statusText.innerHTML = `🏠 방 개설 성공! <br><span style="font-size: 1.4rem; color: #00ffcc; font-weight: bold; background:#111; padding:2px 10px; border-radius:4px;">${id}</span><br>게스트에게 코드를 알려주세요!`;
+            });
+
+            peer.on('connection', (connection) => {
+                conn = connection;
+                setupConnection();
+            });
+        }
+
+        function joinRoom() {
+            const code = document.getElementById('code-input').value.trim();
+            if (!code) { alert("접속코드를 입력하세요!"); return; }
+            isHost = false;
+            statusText.innerText = `코드 [ ${code} ] 방에 접속 시도 중...`;
+            conn = peer.connect(code);
+            setupConnection();
+        }
+
+        function setupConnection() {
+            conn.on('open', () => {
+                statusText.innerText = "🎮 온라인 대전 시작!";
+                document.getElementById('menu').style.display = 'none';
+
+                if (isHost) {
+                    myPlayer.skill = SKILL_TYPES[Math.floor(Math.random() * SKILL_TYPES.length)];
+                    let remainSkills = SKILL_TYPES.filter(s => s !== myPlayer.skill);
+                    enemyPlayer.skill = remainSkills[Math.floor(Math.random() * remainSkills.length)];
+                    
+                    setTimeout(() => {
+                        conn.send({ type: 'init_skills', hostSkill: myPlayer.skill, guestSkill: enemyPlayer.skill });
+                    }, 500);
+                }
+                gameStarted = true;
+                gameLoop();
+            });
+
+            conn.on('data', (data) => {
+                if (data.type === 'init_skills') {
+                    myPlayer.skill = data.guestSkill;
+                    enemyPlayer.skill = data.hostSkill;
+                }
+                if (data.type === 'state') {
+                    enemyPlayer.x = data.player.x;
+                    enemyPlayer.y = data.player.y;
+                    enemyPlayer.hp = data.player.hp;
+                    enemyPlayer.facing = data.player.facing;
+                    enemyPlayer.kills = data.player.kills;
+                    enemyPlayer.deaths = data.player.deaths;
+                    enemyPlayer.slowTimer = data.player.slowTimer;
+                    projectiles = data.projectiles;
+                    firewalls = data.firewalls; 
+                    lightnings = data.lightnings;
+                    blizzardActive = data.blizzardActive;
+                    updateScoreboard();
+                }
+                if (data.type === 'hit') {
+                    processDamage(data.damage);
+                }
+                if (data.type === 'blizzard_hit') {
+                    myPlayer.slowTimer = 150; 
+                }
+            });
+        }
+
+        function processDamage(amount) {
+            myPlayer.hp -= amount;
+            if (myPlayer.hp <= 0) {
+                myPlayer.deaths++; 
+                myPlayer.hp = 100;
+                myPlayer.x = isHost ? 100 : 480;
+                myPlayer.y = 360;
+                conn.send({ type: 'hit_ack' }); 
+            }
+            updateScoreboard();
+        }
+
+        function updateScoreboard() {
+            const p1 = isHost ? myPlayer : enemyPlayer;
+            const p2 = isHost ? enemyPlayer : myPlayer;
+            p1KdText.innerText = `${p1.kills} K / ${p1.deaths} D`;
+            p2KdText.innerText = `${p2.kills} K / ${p2.deaths} D`;
+
+            skillIdText.innerHTML = `내 특수 스킬: <span style="color:#00ffcc">${SKILL_NAMES[myPlayer.skill] || '로딩중..'}</span> (단축키: [ E ] 키)`;
+        }
+
+        window.addEventListener('keydown', e => {
+            // [수정사항] W, E, 방향키 조작 시 브라우저 기본 스크롤 등 오작동 차단
+            if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'w', 'W', 'e', 'E'].includes(e.key)) e.preventDefault();
+            if (e.key in keys) keys[e.key] = true;
+            
+            if (!gameStarted) return;
+
+            // [수정사항] 일반 공격 키를 'W' 또는 'w' 키로 통일 변경
+            if ((e.key === 'w' || e.key === 'W') && myPlayer.hp > 0) {
+                projectiles.push({
+                    owner: peer.id,
+                    x: myPlayer.facing === 1 ? myPlayer.x + 30 : myPlayer.x - 10,
+                    y: myPlayer.y + 12,
+                    vx: myPlayer.facing * 7
+                });
+            }
+
+            // 특수 스킬 키 [ E ]
+            if ((e.key === 'e' || e.key === 'E') && myPlayer.skillCool <= 0) {
+                executeSkill(myPlayer.skill);
+                myPlayer.skillCool = 300; 
+            }
+        });
+        window.addEventListener('keyup', e => { if (e.key in keys) keys[e.key] = false; });
+
+        function executeSkill(skillType) {
+            if (skillType === 'FIREWALL') {
+                firewalls.push({
+                    owner: peer.id, x: myPlayer.x - 20, y: canvas.height - 25, w: 64, h: 10, timer: 180 
+                });
+            } else if (skillType === 'LIGHTNING') {
+                lightnings.push({
+                    owner: peer.id, x: enemyPlayer.x - 15, y: 0, w: 50, h: canvas.height - 15, timer: 20, hasHit: false
+                });
+            } else if (skillType === 'BLIZZARD') {
+                if (isHost) blizzardActive.host = 150;
+                else blizzardActive.guest = 150;
+                conn.send({ type: 'blizzard_hit' });
+            }
+        }
+
+        function gameLoop() {
+            if (!gameStarted) return;
+
+            if (myPlayer.skillCool > 0) myPlayer.skillCool--;
+            if (myPlayer.slowTimer > 0) myPlayer.slowTimer--;
+
+            const currentSpeed = (myPlayer.slowTimer > 0) ? 1.5 : 4;
+
+            if (keys.ArrowLeft) { myPlayer.vx = -currentSpeed; myPlayer.facing = -1; }
+            else if (keys.ArrowRight) { myPlayer.vx = currentSpeed; myPlayer.facing = 1; }
+            else { myPlayer.vx = 0; }
+
+            if (keys.ArrowUp && myPlayer.y >= CANVAS_HEIGHT - 40) {
+                myPlayer.vy = (myPlayer.slowTimer > 0) ? -7 : -12; 
+            }
+
+            myPlayer.x += myPlayer.vx;
+            myPlayer.y += myPlayer.vy;
+            myPlayer.vy += 0.5; 
+
+            if (myPlayer.y >= CANVAS_HEIGHT - 40) { myPlayer.y = CANVAS_HEIGHT - 40; myPlayer.vy = 0; }
+            if (myPlayer.x < 0) myPlayer.x = 0;
+            if (myPlayer.x > CANVAS_WIDTH - 24) myPlayer.x = CANVAS_WIDTH - 24;
+
+            if (blizzardActive.host > 0) blizzardActive.host--;
+            if (blizzardActive.guest > 0) blizzardActive.guest--;
+
+            if (isHost) {
+                for (let i = firewalls.length - 1; i >= 0; i--) {
+                    firewalls[i].timer--;
+                    const fw = firewalls[i];
+                    [myPlayer, enemyPlayer].forEach(p => {
+                        if(p.x + 24 > fw.x && p.x < fw.x + fw.w && p.y >= canvas.height - 45) {
+                            if(Math.random() < 0.12) { 
+                                if (p === myPlayer) processDamage(2);
+                                else conn.send({ type: 'hit', damage: 2 });
+                            }
+                        }
+                    });
+                    if (firewalls[i].timer <= 0) firewalls.splice(i, 1);
+                }
+            }
+
+            for (let i = lightnings.length - 1; i >= 0; i--) {
+                lightnings[i].timer--;
+                const lg = lightnings[i];
+                if (lg.owner === peer.id && !lg.hasHit) {
+                    if (enemyPlayer.x + 24 > lg.x && enemyPlayer.x < lg.x + lg.w) {
+                        conn.send({ type: 'hit', damage: 30 }); 
+                        if (enemyPlayer.hp - 30 <= 0) myPlayer.kills++;
+                        lg.hasHit = true;
+                    }
+                }
+                if (lightnings[i].timer <= 0) lightnings.splice(i, 1);
+            }
+
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const proj = projectiles[i];
+                proj.x += proj.vx;
+                if (proj.owner === peer.id) {
+                    if (proj.x > enemyPlayer.x && proj.x < enemyPlayer.x + 24 && proj.y > enemyPlayer.y && proj.y < enemyPlayer.y + 32) {
+                        conn.send({ type: 'hit', damage: 15 });
+                        if(enemyPlayer.hp - 15 <= 0) myPlayer.kills++;
+                        projectiles.splice(i, 1);
+                        continue;
+                    }
+                }
+                if (proj.x < 0 || proj.x > CANVAS_WIDTH) projectiles.splice(i, 1);
+            }
+
+            conn.send({
+                type: 'state',
+                player: { x: myPlayer.x, y: myPlayer.y, hp: myPlayer.hp, facing: myPlayer.facing, kills: myPlayer.kills, deaths: myPlayer.deaths, slowTimer: myPlayer.slowTimer },
+                projectiles: projectiles,
+                firewalls: firewalls,
+                lightnings: lightnings,
+                blizzardActive: blizzardActive
+            });
+
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = '#1a1a22';
+            ctx.fillRect(0, canvas.height - 15, canvas.width, 15);
+
+            firewalls.forEach(fw => {
+                ctx.fillStyle = 'rgba(255, 100, 0, 0.8)'; ctx.fillRect(fw.x, fw.y, fw.w, fw.h);
+                ctx.fillStyle = '#ffcc00'; ctx.fillRect(fw.x + Math.random()*fw.w, fw.y - Math.random()*15, 3, 3);
+            });
+
+            lightnings.forEach(lg => {
+                ctx.fillStyle = 'rgba(0, 220, 255, 0.6)'; ctx.fillRect(lg.x, lg.y, lg.w, lg.h);
+                ctx.fillStyle = '#ffffff'; ctx.fillRect(lg.x + lg.w/2 - 4, lg.y, 8, lg.h);
+            });
+
+            if (blizzardActive.host > 0 || blizzardActive.guest > 0) {
+                ctx.fillStyle = 'rgba(220, 245, 255, 0.15)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = '#ffffff';
+                for(let k=0; k<10; k++){ ctx.fillRect(Math.random()*canvas.width, Math.random()*canvas.height, 4, 4); }
+            }
+
+            projectiles.forEach(proj => {
+                ctx.fillStyle = proj.owner === peer.id ? myPlayer.color : enemyPlayer.color;
+                ctx.beginPath(); ctx.arc(proj.x, proj.y, 5, 0, Math.PI * 2); ctx.fill();
+            });
+
+            ctx.fillStyle = (myPlayer.slowTimer > 0) ? '#80deea' : myPlayer.color;
+            ctx.fillRect(myPlayer.x, myPlayer.y, 24, 32);
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(myPlayer.x + (myPlayer.facing === 1 ? 16 : 4), myPlayer.y + 6, 4, 4);
+
+            ctx.fillStyle = 'red'; ctx.fillRect(myPlayer.x - 4, myPlayer.y - 12, 32, 4);
+            ctx.fillStyle = '#00ffcc'; ctx.fillRect(myPlayer.x - 4, myPlayer.y - 12, 32 * (myPlayer.hp / 100), 4);
+            if(myPlayer.skillCool > 0) {
+                ctx.fillStyle = '#ffeb3b'; ctx.fillRect(myPlayer.x - 4, myPlayer.y - 6, 32 * (myPlayer.skillCool / 300), 2);
+            }
+
+            ctx.fillStyle = (enemyPlayer.slowTimer > 0) ? '#80deea' : enemyPlayer.color;
+            ctx.fillRect(enemyPlayer.x, enemyPlayer.y, 24, 32);
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(enemyPlayer.x + (enemyPlayer.facing === 1 ? 16 : 4), enemyPlayer.y + 6, 4, 4);
+
+            ctx.fillStyle = 'red'; ctx.fillRect(enemyPlayer.x - 4, enemyPlayer.y - 12, 32, 4);
+            ctx.fillStyle = '#00ffcc'; ctx.fillRect(enemyPlayer.x - 4, enemyPlayer.y - 12, 32 * (enemyPlayer.hp / 100), 4);
+        }
+    </script>
+</body>
+</html>
