@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>초간단 P2P 온라인 격투 게임</title>
+    <style>
+        body {
+            background: #141419; color: #fff; font-family: sans-serif;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            height: 100vh; margin: 0; user-select: none;
+        }
+        h1 { margin: 0 0 10px 0; color: #ff5722; }
+        #menu { background: #1e1e24; padding: 15px; border-radius: 8px; margin-bottom: 15px; text-align: center; }
+        button { padding: 8px 15px; background: #ff5722; border: none; color: white; cursor: pointer; border-radius: 4px; font-weight: bold;}
+        input { padding: 7px; border-radius: 4px; border: 1px solid #444; background: #2d2d3a; color: white; width: 250px; }
+        canvas { background: #25252e; border: 4px solid #444; border-radius: 8px; }
+        .info { margin-top: 10px; color: #888; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+
+    <h1>💥 P2P JUMP BRAWL</h1>
+    
+    <div id="menu">
+        <div id="create-zone">
+            <button onclick="createRoom()">방 만들기 (링크 생성)</button>
+        </div>
+        <div id="link-zone" style="display:none; margin-top:10px;">
+            <p>친구에게 이 전체 주소를 복사해서 보내세요:</p>
+            <input type="text" id="room-link" readonly onclick="this.select()">
+        </div>
+        <div id="status" style="margin-top: 10px; color: #ffeb3b;">지정된 링크로 접속하거나 방을 만드세요!</div>
+    </div>
+
+    <canvas id="gameCanvas" width="600" height="400"></canvas>
+    <div class="info">조작: 방향키 ◀ ▶ 이동 | ▲ 점프 | 스페이스바(Space) 공격</div>
+
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusText = document.getElementById('status');
+
+        let peer = null;
+        let conn = null;
+        let isHost = false;
+        let gameStarted = false;
+
+        // 게임 기본 물리 데이터
+        const CANVAS_WIDTH = 600;
+        const CANVAS_HEIGHT = 400;
+
+        let myPlayer = { x: 100, y: 360, vx: 0, vy: 0, color: '#4CAF50', hp: 100, score: 0, facing: 1 };
+        let enemyPlayer = { x: 480, y: 360, vx: 0, vy: 0, color: '#FF5722', hp: 100, score: 0, facing: -1 };
+        let projectiles = [];
+
+        const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false };
+
+        // URL에서 방 ID가 있는지 확인 (친구가 링크 타고 들어왔는지 확인)
+        const urlParams = new URLSearchParams(window.location.search);
+        const roomId = urlParams.get('room');
+
+        if (roomId) {
+            // 링크를 타고 들어온 게스트 플레이어 세팅
+            statusText.innerText = "방장에게 연결 중...";
+            peer = new Peer();
+            peer.on('open', () => {
+                conn = peer.connect(roomId);
+                setupConnection();
+            });
+        } else {
+            // 직접 접속한 상태
+            peer = new Peer();
+        }
+
+        // 1. 방장이 방을 생성할 때 실행되는 함수
+        function createRoom() {
+            isHost = true;
+            const generatedId = Math.random().toString(36).substring(2, 8);
+            
+            peer = new Peer(generatedId);
+            peer.on('open', (id) => {
+                document.getElementById('create-zone').style.display = 'none';
+                document.getElementById('link-zone').style.display = 'block';
+                
+                // 현재 페이지 주소 뒤에 ?room=방id 를 붙여서 링크 생성
+                const baseLink = window.location.href.split('?')[0];
+                document.getElementById('room-link').value = `${baseLink}?room=${id}`;
+                statusText.innerText = "친구의 접속을 기다리는 중...";
+            });
+
+            // 게스트가 접속 요청을 보냈을 때
+            peer.on('connection', (connection) => {
+                conn = connection;
+                setupConnection();
+            });
+        }
+
+        // 2. 통신 연결 수립 시 공통 세팅
+        function setupConnection() {
+            conn.on('open', () => {
+                statusText.innerText = "🎮 연결 성공! 게임 매치가 시작됩니다!";
+                gameStarted = true;
+                gameLoop();
+            });
+
+            // 상대방이 보낸 동기화 데이터 수신
+            conn.on('data', (data) => {
+                if (data.type === 'state') {
+                    // 상대방 위치 및 발사체 동기화 수신
+                    enemyPlayer.x = data.player.x;
+                    enemyPlayer.y = data.player.y;
+                    enemyPlayer.hp = data.player.hp;
+                    enemyPlayer.facing = data.player.facing;
+                    projectiles = data.projectiles;
+                }
+                if (data.type === 'hit') {
+                    myPlayer.hp -= 15;
+                    if(myPlayer.hp <= 0) {
+                        myPlayer.hp = 100;
+                        myPlayer.x = isHost ? 100 : 480;
+                        myPlayer.y = 360;
+                    }
+                }
+            });
+        }
+
+        // 키보드 이벤트 핸들러
+        window.addEventListener('keydown', e => {
+            if (['ArrowLeft', 'ArrowRight', 'ArrowUp', ' '].includes(e.key)) e.preventDefault();
+            if (e.key in keys) keys[e.key] = true;
+            
+            if (e.key === ' ' && gameStarted && myPlayer.hp > 0) {
+                // 공격 발사 후 상대방에게 발사체 동기화 전송용 생성
+                projectiles.push({
+                    owner: peer.id,
+                    x: myPlayer.facing === 1 ? myPlayer.x + 30 : myPlayer.x - 10,
+                    y: myPlayer.y + 12,
+                    vx: myPlayer.facing * 7
+                });
+            }
+        });
+        window.addEventListener('keyup', e => { if (e.key in keys) keys[e.key] = false; });
+
+        // 메인 루프 엔진
+        function gameLoop() {
+            if (!gameStarted) return;
+
+            // 내 캐릭터 물리 처리
+            if (keys.ArrowLeft) { myPlayer.vx = -4; myPlayer.facing = -1; }
+            else if (keys.ArrowRight) { myPlayer.vx = 4; myPlayer.facing = 1; }
+            else { myPlayer.vx = 0; }
+
+            if (keys.ArrowUp && myPlayer.y >= CANVAS_HEIGHT - 40) {
+                myPlayer.vy = -12;
+            }
+
+            myPlayer.x += myPlayer.vx;
+            myPlayer.y += myPlayer.vy;
+            myPlayer.vy += 0.5; // 중력
+
+            if (myPlayer.y >= CANVAS_HEIGHT - 40) {
+                myPlayer.y = CANVAS_HEIGHT - 40;
+                myPlayer.vy = 0;
+            }
+            if (myPlayer.x < 0) myPlayer.x = 0;
+            if (myPlayer.x > CANVAS_WIDTH - 24) myPlayer.x = CANVAS_WIDTH - 24;
+
+            // 내 화면 기준 투사체 이동 및 충돌 판정
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const proj = projectiles[i];
+                proj.x += proj.vx;
+
+                // 내가 쏜 투사체가 상대방에게 맞았는지 확인
+                if (proj.owner === peer.id) {
+                    if (proj.x > enemyPlayer.x && proj.x < enemyPlayer.x + 24 && proj.y > enemyPlayer.y && proj.y < enemyPlayer.y + 32) {
+                        conn.send({ type: 'hit' }); // 상대방에게 맞았다고 신호 송신
+                        projectiles.splice(i, 1);
+                        continue;
+                    }
+                }
+
+                if (proj.x < 0 || proj.x > CANVAS_WIDTH) {
+                    projectiles.splice(i, 1);
+                }
+            }
+
+            // 내 상태를 상대방 브라우저로 냅다 전송하기 (실시간 동기화 핵심)
+            conn.send({
+                type: 'state',
+                player: { x: myPlayer.x, y: myPlayer.y, hp: myPlayer.hp, facing: myPlayer.facing },
+                projectiles: projectiles
+            });
+
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 바닥
+            ctx.fillStyle = '#1a1a22';
+            ctx.fillRect(0, canvas.height - 15, canvas.width, 15);
+
+            // 투사체들 그리기
+            projectiles.forEach(proj => {
+                ctx.fillStyle = proj.owner === peer.id ? myPlayer.color : enemyPlayer.color;
+                ctx.beginPath(); ctx.arc(proj.x, proj.y, 5, 0, Math.PI * 2); ctx.fill();
+            });
+
+            // 내 캐릭터 그리기
+            ctx.fillStyle = myPlayer.color;
+            ctx.fillRect(myPlayer.x, myPlayer.y, 24, 32);
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(myPlayer.x + (myPlayer.facing === 1 ? 16 : 4), myPlayer.y + 6, 4, 4);
+
+            // 내 체력바
+            ctx.fillStyle = 'red'; ctx.fillRect(myPlayer.x - 4, myPlayer.y - 12, 32, 4);
+            ctx.fillStyle = '#00ffcc'; ctx.fillRect(myPlayer.x - 4, myPlayer.y - 12, 32 * (myPlayer.hp / 100), 4);
+
+            // 상대방 캐릭터 그리기
+            ctx.fillStyle = enemyPlayer.color;
+            ctx.fillRect(enemyPlayer.x, enemyPlayer.y, 24, 32);
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(enemyPlayer.x + (enemyPlayer.facing === 1 ? 16 : 4), enemyPlayer.y + 6, 4, 4);
+
+            // 상대방 체력바
+            ctx.fillStyle = 'red'; ctx.fillRect(enemyPlayer.x - 4, enemyPlayer.y - 12, 32, 4);
+            ctx.fillStyle = '#00ffcc'; ctx.fillRect(enemyPlayer.x - 4, enemyPlayer.y - 12, 32 * (enemyPlayer.hp / 100), 4);
+        }
+    </script>
+</body>
+</html>
