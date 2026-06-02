@@ -10,12 +10,12 @@
             height: 100vh; margin: 0; user-select: none;
         }
         h1 { margin: 0 0 5px 0; color: #ff5722; text-shadow: 0 0 10px rgba(255,87,34,0.3); }
-        #menu { background: #1e1e24; padding: 15px; border-radius: 8px; margin-bottom: 15px; text-align: center; border: 1px solid #333; }
+        #menu { background: #1e1e24; padding: 20px; border-radius: 8px; margin-bottom: 15px; text-align: center; border: 1px solid #333; min-width: 300px; }
+        .menu-section { margin: 15px 0; padding: 10px; background: #25252e; border-radius: 6px; }
         button { padding: 8px 15px; background: #ff5722; border: none; color: white; cursor: pointer; border-radius: 4px; font-weight: bold; margin: 5px; }
         button:hover { background: #ff7043; }
         input { padding: 8px; border-radius: 4px; border: 1px solid #444; background: #2d2d3a; color: white; width: 150px; text-align: center; font-size: 1rem; }
         
-        /* 전광판 스타일 */
         #scoreboard {
             display: flex; gap: 40px; background: #1e1e24; padding: 10px 30px; 
             border-radius: 6px; margin-bottom: 15px; border-bottom: 3px solid #ff5722;
@@ -39,10 +39,16 @@
     </div>
     
     <div id="menu">
-        <input type="text" id="code-input" placeholder="접속코드 입력" maxlength="6">
-        <button onclick="createRoom()">방 만들기</button>
-        <button onclick="joinRoom()">방 들어가기</button>
-        <div id="status" style="margin-top: 10px; color: #ffeb3b;">원하는 코드를 입력하고 방을 만들거나 들어가세요!</div>
+        <div class="menu-section">
+            <button onclick="createRoom()">방 만들기 (코드 자동 생성)</button>
+        </div>
+
+        <div class="menu-section">
+            <input type="text" id="code-input" placeholder="접속코드 6자리 입력" maxlength="6">
+            <button onclick="joinRoom()">방 들어가기</button>
+        </div>
+
+        <div id="status" style="margin-top: 10px; color: #ffeb3b;">방을 만들거나 코드를 입력해 입장하세요!</div>
     </div>
 
     <canvas id="gameCanvas" width="600" height="400"></canvas>
@@ -53,88 +59,3 @@
     </div>
 
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-    <script>
-        const canvas = document.getElementById('gameCanvas');
-        const ctx = canvas.getContext('2d');
-        const statusText = document.getElementById('status');
-        const p1KdText = document.getElementById('p1-kd');
-        const p2KdText = document.getElementById('p2-kd');
-
-        let peer = null;
-        let conn = null;
-        let isHost = false;
-        let gameStarted = false;
-
-        const CANVAS_WIDTH = 600;
-        const CANVAS_HEIGHT = 400;
-
-        // 플레이어 데이터 구조 (킬, 데스 추가)
-        let myPlayer = { x: 100, y: 360, vx: 0, vy: 0, color: '#4CAF50', hp: 100, kills: 0, deaths: 0, facing: 1, skillCool: 0 };
-        let enemyPlayer = { x: 480, y: 360, vx: 0, vy: 0, color: '#FF5722', hp: 100, kills: 0, deaths: 0, facing: -1 };
-        
-        let projectiles = [];
-        let firewalls = []; // 스킬: 불장판 배열
-
-        const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false };
-
-        // 초기 랜덤 피어 오브젝트 생성
-        peer = new Peer();
-
-        // 1. [방 만들기] 기능: 입력한 코드가 방 ID가 됨
-        function createRoom() {
-            const code = document.getElementById('code-input').value.trim();
-            if (!code) { alert("접속 코드를 입력해 주세요! (예: 1234)"); return; }
-
-            isHost = true;
-            // 기존 랜덤 peer 닫고 입력한 코드로 재개설
-            peer.destroy();
-            
-            peer = new Peer(code);
-            
-            peer.on('open', (id) => {
-                statusText.innerText = `🏠 방 개설 완료! 접속코드: [ ${id} ] 등을 친구에게 알려주세요.`;
-            });
-
-            peer.on('connection', (connection) => {
-                conn = connection;
-                setupConnection();
-            });
-
-            peer.on('error', (err) => {
-                if (err.type === 'unavailable-id') {
-                    statusText.innerText = "❌ 이미 누군가 사용 중인 접속코드입니다. 다른 코드를 쓰세요.";
-                }
-            });
-        }
-
-        // 2. [방 들어가기] 기능: 코드를 입력해 방장에게 직접 다이렉트 접속
-        function joinRoom() {
-            const code = document.getElementById('code-input').value.trim();
-            if (!code) { alert("들어가갈 방의 접속코드를 입력하세요!"); return; }
-
-            isHost = false;
-            statusText.innerText = `${code} 방에 연결을 시도하는 중...`;
-            
-            conn = peer.connect(code);
-            setupConnection();
-        }
-
-        // 3. 네트워킹 연결 완료 핸들러
-        function setupConnection() {
-            conn.on('open', () => {
-                statusText.innerText = "🎮 온라인 연결 성공! 게임 시작!";
-                document.getElementById('menu').style.display = 'none';
-                gameStarted = true;
-                gameLoop();
-            });
-
-            conn.on('data', (data) => {
-                if (data.type === 'state') {
-                    enemyPlayer.x = data.player.x;
-                    enemyPlayer.y = data.player.y;
-                    enemyPlayer.hp = data.player.hp;
-                    enemyPlayer.facing = data.player.facing;
-                    enemyPlayer.kills = data.player.kills;
-                    enemyPlayer.deaths = data.player.deaths;
-                    projectiles = data.projectiles;
-                    firewalls = data.firewalls;
